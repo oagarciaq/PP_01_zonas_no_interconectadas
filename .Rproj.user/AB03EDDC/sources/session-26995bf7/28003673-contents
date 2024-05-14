@@ -1,0 +1,405 @@
+library(readr)
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+library(purrr)
+
+
+# Load data ---------------------------------------------------------------
+
+person <- read_excel(
+  "C:/Users/ACER/Desktop/plan de inversion/MAXIMO.xlsx", "PERSON"
+) |> 
+  janitor::clean_names()
+
+workorder <- read_excel(
+  "C:/Users/ACER/Desktop/plan de inversion/MAXIMO.xlsx", "WORKORDER"
+)|> 
+  janitor::clean_names() |> 
+  filter(!is.na(workorder_wonum))
+
+woactivity <- read_excel(
+  "C:/Users/ACER/Desktop/plan de inversion/MAXIMO.xlsx", "WOACTIVITY"
+)|> 
+  janitor::clean_names()
+
+matusetrans <- read_excel(
+  "C:/Users/ACER/Desktop/plan de inversion/MAXIMO.xlsx", "MATUSETRANS"
+)|> 
+  janitor::clean_names()
+
+woserviceaddress <- read_excel(
+  "C:/Users/ACER/Desktop/plan de inversion/MAXIMO.xlsx", "WOSERVICEADDRESS"
+)|> 
+  janitor::clean_names()
+
+notas <- read_excel(
+  "C:/Users/ACER/Desktop/plan de inversion/Notas de cierre.xlsx"
+)
+colnames(notas) <- notas[1,]
+notas <- notas[-1,c(-2,-3,-5:-9)] |> 
+  rename(
+    notas_wonum = "Orden de trabajo", 
+    notas_ldtext = "Ldtext"
+  ) |> 
+  filter(!is.na(notas_wonum)) |> 
+  mutate(notas_ldtext =
+    ifelse(
+      grepl("^La pestaña de consumos reales es solo un", notas_ldtext),
+      NA,
+      notas_ldtext
+    )
+  ) |> 
+  filter(!is.na(notas_ldtext))
+  
+
+
+# Join data ---------------------------------------------------------------
+
+
+general <- matusetrans |> 
+  left_join(
+    woactivity, 
+    c("matusetrans_refwo" = "woactivity_wonum")
+  ) |> 
+  left_join(
+    workorder, 
+    c("woactivity_wogroup" = "workorder_wonum")
+  ) |> 
+  left_join(
+    woserviceaddress, 
+    c("woactivity_wogroup" = "woserviceaddress_wonum")
+  ) |> 
+  left_join(
+    notas,
+    c("woactivity_wogroup" = "notas_wonum")
+  ) |> 
+  rename(
+    activity = matusetrans_refwo, 
+    wonum = woactivity_wogroup
+  ) |> 
+  filter(workorder_slxgrresp == "DEN51") |> 
+  filter(!is.na(wonum)) |> 
+  filter(grepl("2024-04", workorder_actfinish)) |> 
+  filter(!is.na(workorder_slxcontractnum)) |> 
+  filter(matusetrans_storeloc == "Y033" | matusetrans_storeloc == "RO14")
+
+
+# Tablas del plan de inversion ----------------------------------------------------------
+
+
+eve_pro_sol <- function(descripcion){
+  tipo = substr(
+           descripcion,
+           1,
+           3
+         )
+  
+  case_when(
+    tipo == "EVE" ~ "Evento",
+    tipo == "PRO" ~ "Proceso",
+    TRUE ~ "Sin definir"
+  )
+}
+
+cuadrillas <- function(cuadrilla){
+  case_when(
+    cuadrilla == "DEMRM32CAOC" ~ "M32 OCAÑA",
+    cuadrilla == "DEMRM32CACON" ~ "M32 CONVENCIÓN",
+    cuadrilla == "DEMRM32CAABR" ~ "M32 ABREGO",
+    cuadrilla == "DEMRM32CASANC" ~ "M32 SAN CALIXTO",
+    cuadrilla == "DEMRM32CAHAC" ~ "M32 HACARÍ",
+    cuadrilla == "DEMRM32CAOC" ~ "M32 OCAÑA",
+    cuadrilla == "DEMRM32CACAR" ~ "M32 EL CARMEN",
+    cuadrilla == "M02ASERRIO" ~ "M02 ASERRIO"
+  )
+}
+
+extraer_posicion <- function(notas_ldtext, aparicion, pattern) {
+  unlist(Map(function(x, n) {
+    if (grepl(pattern, x)) {
+      matches <- gregexpr(pattern, x)[[1]]
+      if (length(matches) >= n) return(matches[n])
+    }
+    return(NA)
+  }, notas_ldtext, aparicion))
+}
+
+
+n1 <- general |> 
+  select(
+    matusetrans_description,
+    workorder_actfinish,
+    woserviceaddress_slxmunicipiodesc,
+    workorder_slxcontractnum,
+    workorder_slxcuadrillafsm,
+    workorder_description,
+    matusetrans_quantity,
+    notas_ldtext,
+    wonum,
+    matusetrans_externalrefid,
+    workorder_reasonforchange
+  ) |> 
+  filter(grepl("POSTE", matusetrans_description)) |> 
+  filter(grepl("8M", matusetrans_description)) |> 
+  rowwise() |> 
+  group_by(wonum) |> 
+  mutate(
+    Año = year(workorder_actfinish),
+    "PLAN DE INVERSIÓN" = "",
+    "Proyecto Terciario" ="Reposición anual de postes",
+    "Tipo de Inversión" = "III",
+    Regional = "OCAÑA",
+    Aimentador = "EN ESPERA",
+    "Nivel de Tensión" = "1",
+    UC = "EN ESPERA",
+    "Descripcion UC" = "EN ESPERA",
+    Municipio = woserviceaddress_slxmunicipiodesc,
+    "Código de Usuario" = "EN ESPERA",
+    "Direción" = "EN ESPERA",
+    "Barrio/Vereda/Corregimiento" = "EN ESPERA",
+    "E - P - S" = eve_pro_sol(workorder_description),
+    Numero =
+      gsub( #para eliminar primer espacio en blanco que a veces aparece
+        "\\s+",
+        "",
+        substr(
+          workorder_description,
+          5,
+          head(
+            gregexpr(       #Como a veces tiene espacio o no extraigo el valor hasta
+              " ",          #el segundo espacio el cual no sabré en qué posición esta
+              substr(#ademas tapoco se la longitud de los numeros
+                workorder_description,
+                7,
+                nchar(workorder_description)
+              )
+            )[[1]], 1
+          ) + 5
+        )
+      ),
+    Nombre = "EN ESPERA",
+    "Contrato/Soporte" = workorder_slxcontractnum,
+    MOVIL = cuadrillas(workorder_slxcuadrillafsm),
+    "Código. transformador" = "EN ESPERA",
+    PUNTO = "",
+    aparicion = row_number(),
+    X =
+      gsub(
+        "\\s+|: | Y",
+        "",
+        substr(
+          notas_ldtext,
+          extraer_posicion(notas_ldtext, aparicion, "X") + 1,
+          extraer_posicion(notas_ldtext, aparicion, "X") + 9
+        )
+      ), 
+    Y =
+      gsub(
+        "\\s+|: | Y",
+        "",
+        substr(
+          notas_ldtext,
+          extraer_posicion(notas_ldtext, aparicion, "Y") + 1,
+          extraer_posicion(notas_ldtext, aparicion, "Y") + 9
+        )
+      ),
+    Z = "EN ESPERA",
+    "FECHA DE INSTALACION" = workorder_actfinish,
+    MES = month(workorder_actfinish),
+    "Código de estructura" = "",
+    Apoyo = "Poste",
+    Material = 
+      ifelse(
+        substr(matusetrans_description, 7, 10) == "PRFV",
+        "fibra de vidrio",
+        "concreto"
+      ),
+    Altura = 
+      gsub(
+        "M",
+        "",
+        substr(
+          matusetrans_description,
+          ifelse(Material == "concreto", 16, 12),
+          ifelse(Material == "concreto", 17, 13)
+        )
+      )
+      ,
+    "Población" = "EN ESPERA",
+    "Disposición" = 
+      ifelse(
+        grepl(
+          "510",
+          matusetrans_description
+        ),
+        "suspensión",
+        "retención"
+      )
+      ,
+    KGF =
+      gsub(
+        "K",
+        "",
+        substr(
+          matusetrans_description,
+          head(gregexpr("KGF",matusetrans_description)[[1]],1)-3,
+          head(gregexpr("KGF",matusetrans_description)[[1]],1)
+        )
+      ),
+    "Tipo de red" = "EN ESPERA",
+    "OT DE MANO DE OBRA" = wonum,
+    "OT DE LEGALIZACIÓN DEL MATERIAL" = matusetrans_externalrefid,
+    OBSERVACIONES = workorder_reasonforchange
+  ) 
+n1 <- n1[,-1:-11]
+
+
+
+
+n2 <- general |> 
+  select(
+    matusetrans_description,
+    workorder_actfinish,
+    woserviceaddress_slxmunicipiodesc,
+    workorder_slxcontractnum,
+    workorder_slxcuadrillafsm,
+    workorder_description,
+    matusetrans_quantity,
+    notas_ldtext,
+    wonum,
+    matusetrans_externalrefid,
+    workorder_reasonforchange
+  ) |> 
+  filter(grepl("POSTE", matusetrans_description)) |> 
+  filter(!grepl("8M", matusetrans_description)) |> 
+  rowwise() |> 
+  group_by(wonum) |> 
+  mutate(
+    Año = year(workorder_actfinish),
+    "PLAN DE INVERSIÓN" = "",
+    "Proyecto Terciario" ="Reposición anual de postes",
+    "Tipo de Inversión" = "III",
+    Regional = "OCAÑA",
+    Aimentador = "EN ESPERA",
+    "Nivel de Tensión" = "1",
+    UC = "EN ESPERA",
+    "Descripcion UC" = "EN ESPERA",
+    Municipio = woserviceaddress_slxmunicipiodesc,
+    "Código de Usuario" = "EN ESPERA",
+    "Direción" = "EN ESPERA",
+    "Barrio/Vereda/Corregimiento" = "EN ESPERA",
+    "E - P - S" = eve_pro_sol(workorder_description),
+    Numero =
+      gsub( #para eliminar primer espacio en blanco que a veces aparece
+        "\\s+",
+        "",
+        substr(
+          workorder_description,
+          5,
+          head(
+            gregexpr(       #Como a veces tiene espacio o no extraigo el valor hasta
+              " ",          #el segundo espacio el cual no sabré en qué posición esta
+              substr(#ademas tapoco se la longitud de los numeros
+                workorder_description,
+                7,
+                nchar(workorder_description)
+              )
+            )[[1]], 1
+          ) + 5
+        )
+      ),
+    Nombre = "EN ESPERA",
+    "Contrato/Soporte" = workorder_slxcontractnum,
+    MOVIL = cuadrillas(workorder_slxcuadrillafsm),
+    "Código. transformador" = "EN ESPERA",
+    PUNTO = "",
+    aparicion = row_number(),
+    X =
+      gsub(
+        "\\s+|: | Y",
+        "",
+        substr(
+          notas_ldtext,
+          extraer_posicion(notas_ldtext, aparicion, "X") + 1,
+          extraer_posicion(notas_ldtext, aparicion, "X") + 9
+        )
+      ), 
+    Y =
+      gsub(
+        "\\s+|: | Y",
+        "",
+        substr(
+          notas_ldtext,
+          extraer_posicion(notas_ldtext, aparicion, "Y") + 1,
+          extraer_posicion(notas_ldtext, aparicion, "Y") + 9
+        )
+      ),
+    Z = "EN ESPERA",
+    "FECHA DE INSTALACION" = workorder_actfinish,
+    MES = month(workorder_actfinish),
+    "Código de estructura" = "",
+    Apoyo = "Poste",
+    Material = 
+      ifelse(
+        substr(matusetrans_description, 7, 10) == "PRFV",
+        "fibra de vidrio",
+        "concreto"
+      ),
+    Altura = 
+      gsub(
+        "M",
+        "",
+        substr(
+          matusetrans_description,
+          ifelse(Material == "concreto", 16, 12),
+          ifelse(Material == "concreto", 17, 13)
+        )
+      )
+    ,
+    "Población" = "EN ESPERA",
+    "Disposición" = 
+      ifelse(
+        grepl(
+          "510",
+          matusetrans_description
+        ),
+        "suspensión",
+        "retención"
+      )
+    ,
+    KGF =
+      gsub(
+        "K",
+        "",
+        substr(
+          matusetrans_description,
+          head(gregexpr("KGF",matusetrans_description)[[1]],1)-3,
+          head(gregexpr("KGF",matusetrans_description)[[1]],1)
+        )
+      ),
+    "Tipo de red" = "EN ESPERA",
+    "OT DE MANO DE OBRA" = wonum,
+    "OT DE LEGALIZACIÓN DEL MATERIAL" = matusetrans_externalrefid,
+    OBSERVACIONES = workorder_reasonforchange
+  ) 
+n2 <- n2[,-1:-11]
+
+
+#substr(postes$matusetrans_description, 7, 10)
+#PRUEBA <- gregexpr("X",postes[7,8])[[1]]
+#distinct(PRUEBA)
+#length(PRUEBA)
+
+
+
+
+# Ejemplo de datos
+#datos <- data.frame(mi_columna = c("a", "b", "a", "c", "b", "a", "d", "a"))
+
+# Agregar una nueva columna para contar las apariciones
+#datos$aparicion <- ave(seq_along(datos$mi_columna), datos$mi_columna, FUN = seq_along)
+
+# Mostrar el resultado
+#print(datos)
+
